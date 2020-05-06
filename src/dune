@@ -1,0 +1,6 @@
+(library
+ (name toy)
+ (inline_tests)
+ (preprocess
+  (pps ppx_irmin ppx_inline_test lwt_ppx))
+ (libraries irmin lwt.unix ocamlgraph fmt logs))
