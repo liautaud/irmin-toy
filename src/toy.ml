@@ -211,57 +211,89 @@ struct
         | None -> (p, b) :: merge_children ca bs )
     | [] -> ca
 
-  let set_tree ?parents ?(message = "") ?(mode = `Merge) w p tree =
-    let%lwt head = head w in
-    let%lwt head_node = Commits.node w.t head in
-    let parents = match parents with Some p -> p | None -> head.parents in
+  (** [update_node w p n] traverses the subtree starting at [n] until either:
+      (1) Reaching the node [n'] at path [p]. (2) Reaching a dead end, with the
+      remaining path [p'].
 
-    (* [store_updated p n] stores the updated version of [n] where [tree] is now
-       available under the path [p], and returns the hash of the new root. *)
-    let rec store_updated path node =
-      match (path, node, mode) with
-      | step :: steps, Node children, _ ->
+      On (1), [~on_found n'] is called and should return the hash of the updated
+      version of [n']. On (2), [~on_dead_end p'] is called and should return the
+      hash of the node to add at [p - p']. In any case, the update is propagated
+      recursively to the parents, and the hash of the updated version of [n] is
+      returned. *)
+  let rec update_node ~on_found ~on_dead_end w p n =
+    let rec aux = function
+      | step :: steps, Node children ->
           (* Recursively update the children. *)
           ( match List.assoc_opt step children with
-          | Some hash ->
+          | Some hash -> (
               Nodes.of_hash w.t hash >>= fun child ->
-              store_updated steps child >|= fun child' ->
-              (step, child') :: List.remove_assoc step children
-          | None ->
-              store_updated steps (Node []) >|= fun child' ->
-              (step, child') :: children )
+              aux (steps, child) >|= function
+              | Some child' -> (step, child') :: List.remove_assoc step children
+              | None -> List.remove_assoc step children )
+          | None -> (
+              aux (steps, Node []) >|= function
+              | Some child' -> (step, child') :: children
+              | None -> children ) )
           >>= fun children' ->
           (* Store the resulting node. *)
           Backend.Nodes.set (nodes_t w.t) (Node children') >|= fun nh ->
           (* Return its hash. *)
-          NH nh
-      | _ :: _, Blob _, _ ->
-          (* Add as many ancestors to the tree as necessary, and store the result. *)
-          let tree =
-            List.fold_right
-              (fun step child -> `Node [ (step, child) ])
-              path tree
-          in
-          store_tree w.t tree
-      | [], _, `Set ->
-          (* Store the tree directly. *)
-          store_tree w.t tree
-      | [], _, `Merge ->
-          (* Merge the tree with the current tree and store the result. *)
-          Nodes.tree w.t node >>= fun old ->
-          store_tree w.t (merge_trees old tree)
+          Some (NH nh)
+      | _ :: _, Blob _ -> on_dead_end p
+      | [], _ -> on_found n
     in
 
-    let%lwt nh = store_updated p head_node in
-    let commit = { parents; node = nh; message } in
-    let%lwt commit_hash = Backend.Commits.set (commits_t w.t) commit in
-    let%lwt () = update_head w (CH commit_hash) in
-    Lwt.return commit
+    aux (p, n)
+
+  let set_tree ?parents ?(message = "") ?(mode = `Merge) w p tree =
+    let%lwt head_commit = head w in
+    let%lwt head_node = Commits.node w.t head_commit in
+
+    let on_found n =
+      ( match mode with
+      | `Set -> store_tree w.t tree
+      | `Merge ->
+          Nodes.tree w.t n >>= fun old -> store_tree w.t (merge_trees old tree)
+      )
+      >|= fun c -> Some c
+    in
+
+    let on_dead_end p =
+      store_tree w.t (List.fold_right (fun s c -> `Node [ (s, c) ]) p tree)
+      >|= fun c -> Some c
+    in
+
+    (* Store the updated nodes and the resulting commit. *)
+    let%lwt node' = update_node ~on_found ~on_dead_end w p head_node in
+    let node' = Option.get node' in
+    let parents =
+      match parents with Some p -> p | None -> head_commit.parents
+    in
+    let commit' = { parents; node = node'; message } in
+    let%lwt ch' = Backend.Commits.set (commits_t w.t) commit' in
+    let%lwt () = update_head w (CH ch') in
+    Lwt.return commit'
 
   let set ?parents ?(message = "") w p blob =
     set_tree ?parents ~message w p (`Blob blob)
 
-  let remove ?parents ?(message = "") w p = failwith "Not implemented."
+  let remove ?parents ?(message = "") w p =
+    let%lwt head_commit = head w in
+    let%lwt head_node = Commits.node w.t head_commit in
+
+    let on_found _ = Lwt.return_none in
+    let on_dead_end _ = Lwt.return_none in
+
+    (* Store the updated nodes and the resulting commit. *)
+    let%lwt node' = update_node ~on_found ~on_dead_end w p head_node in
+    let node' = Option.get node' in
+    let parents =
+      match parents with Some p -> p | None -> head_commit.parents
+    in
+    let commit' = { parents; node = node'; message } in
+    let%lwt ch' = Backend.Commits.set (commits_t w.t) commit' in
+    let%lwt () = update_head w (CH ch') in
+    Lwt.return commit'
 
   (** {3 Operations on the object graph.} *)
 
