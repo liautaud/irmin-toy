@@ -42,7 +42,7 @@ module type DATABASE = sig
   (** The type of paths to nodes in the database. *)
 
   type tree = [ `Blob of blob | `Node of (step * tree) list ]
-  (** The type of trees of nodes in the database. *)
+  (** The type of trees in the database. *)
 
   type commit_hash
   (** The type of hashes to commits. *)
@@ -172,17 +172,10 @@ module type DATABASE = sig
 
         Raises [Invalid_argument] if no such node is stored in [t]. *)
 
-    val is_blob : node -> bool
-    (** [is_blob node] returns whether [node] is a blob. *)
-
-    val blob : t -> node -> blob Lwt.t
-    (** [blob t node] returns the blob that [node] points to.
-
-        Raises [Invalid_argument] is [node] is not a blob. *)
-
-    val children : t -> node -> (step * node) list Lwt.t
-    (** [children t node] returns the list of nodes that are direct children of
-        [node], along with their path relative to [node].
+    val children :
+      t -> node -> (step * [ `Blob of blob | `Node of node ]) list Lwt.t
+    (** [children t node] returns the list of nodes or blobs that are direct
+        children of [node], along with their path relative to [node].
 
         Raises [Invalid_argument] if [node] is a blob. *)
 
@@ -207,49 +200,59 @@ module type DATABASE = sig
       the commits, nodes and blobs of an Irmin database. *)
 
   module Graph : sig
-    type vertex = [ `Commit of commit | `Node of node | `Blob of blob ]
+    type label = step option
+
+    type vertex =
+      [ `Commit of commit_hash | `Node of node_hash | `Blob of blob_hash ]
 
     val iter :
       ?depth:int ->
+      ?full:bool ->
+      ?rev:bool ->
       min:vertex list ->
       max:vertex list ->
-      node:(vertex -> unit Lwt.t) ->
-      edge:(vertex -> vertex -> unit Lwt.t) ->
+      vertex:(vertex -> unit Lwt.t) ->
+      edge:(label -> vertex -> vertex -> unit Lwt.t) ->
       skip:(vertex -> bool Lwt.t) ->
-      rev:bool ->
       t ->
       unit Lwt.t
-    (** [iter ~depth ~min ~max ~node ~edge ~skip ~rev t] iterates in over the
-        object graph of database [t] starting with the [max] nodes and bounded
-        by the [min] nodes and by [depth].
+    (** [iter ~depth ~full ~rev ~min ~max ~vertex ~edge ~skip t] iterates in
+        over the object graph of database [t] starting with the [max] vertices
+        and bounded by the [min] vertices and by [depth].
 
-        It applies three functions while traversing the graph: [node] on the
-        nodes; [edge n predecessor_of_n] on the directed edges and [skip n] to
-        not include a node [n], its predecessors and the outgoing edges of [n].
+        It applies three functions while traversing the graph: [vertex] on the
+        vertices; [edge label v predecessor_of_v] on the directed edges and
+        [skip n] to not include a vertex [n], its predecessors and the outgoing
+        edges of [n].
 
-        If [rev] is true (the default) then the graph is traversed in the
-        reverse topological order: [node n] is applied only after it was applied
-        on all its predecessors; [edge n p] is applied after [node n]. Note that
-        [edge n p] is applied even if [p] is skipped. *)
+        If [full] is true (default is false) the full graph, including the
+        commits, nodes and blobs, is traversed, otherwise it is the commit
+        history graph only.
+
+        If [rev] is true (default is true) then the graph is traversed in the
+        reverse topological order: [vertex n] is applied only after it was
+        applied on all its predecessors; [edge n p] is applied after [vertex n].
+        Note that [edge n p] is applied even if [p] is skipped. *)
 
     val export :
       ?depth:int ->
       ?full:bool ->
-      date:(int64 -> string) ->
+      min:vertex list ->
+      max:vertex list ->
+      name:string ->
       t ->
       Buffer.t ->
       unit Lwt.t
-    (** [export t ?depth ?full buf] exports the object graph of database [t] to
-        the buffer [buf] using the Graphviz Dot format.
-
-        [depth] is used to limit the depth of the commit history. [None] here
-        means no limitation.
+    (** [export t ?depth ?full ~min ~max ~name t buf] exports the object graph
+        of database [t] to the buffer [buf] using the Graphviz Dot format,
+        starting with the [max] vertices and bounded by the [min] vertices and
+        by [depth].
 
         If [full] is set (default is not) the full graph, including the commits,
         nodes and blobs, is exported, otherwise it is the commit history graph
         only. *)
 
-    val cleanup : ?entry:[ `Heads | `List of commit list ] -> t -> unit Lwt.t
+    val cleanup : ?entry:[ `Branches | `List of commit list ] -> t -> unit Lwt.t
     (** [cleanup ~entry t] runs the garbage collector on the object graph of
         database [t]. All the commits, nodes and blobs which are not reachable
         from [entry] will be deleted from their back-end stores. *)
@@ -258,18 +261,22 @@ end
 
 (** {1 Runtime types.} *)
 
-module type COMPARABLE = sig
-  (** {2 Comparable types.}
-
-      Comparable types are types which support ordering and equality. The
-      easiest way to construct such a type to use the [Irmin.Type] library to
-      define a runtime representation of the type, and use [ty_to_comparable]. *)
-
+module type TYPE = sig
+  (** {2 Runtime types.} *)
   type t
   (** The target type. *)
 
   val t : t Irmin.Type.t
   (** The runtime representation of the target type. *)
+end
+
+module type COMPARABLE = sig
+  (** {2 Comparable types.}
+
+      Comparable types are types which support ordering and equality. The
+      easiest way to construct such a type to use [Type.Comparable_T]. *)
+
+  include TYPE
 
   val equal : t -> t -> bool
   (** [equal a b] returns whether [a] and [b] are equal. *)
@@ -287,6 +294,9 @@ module type SERIALIZABLE = sig
       representation of the type, and use [ty_to_serializable]. *)
 
   include COMPARABLE
+
+  val print : t -> string
+  (** [print v] return the human-readable encoding of [v]. *)
 
   val serialize : t -> string
   (** [serialize v] return the binary encoding of [v]. *)
