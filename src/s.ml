@@ -203,7 +203,10 @@ module type DATABASE = sig
     type label = step option
 
     type vertex =
-      [ `Commit of commit_hash | `Node of node_hash | `Blob of blob_hash ]
+      [ `Branch of branch
+      | `Commit of commit_hash
+      | `Node of node_hash
+      | `Blob of blob_hash ]
 
     val iter :
       ?depth:int ->

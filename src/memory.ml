@@ -59,7 +59,7 @@ module Atomic_Write (K : S.SERIALIZABLE) (V : S.SERIALIZABLE) = struct
 end
 
 (* Memory backend using the stores defined above. *)
-module Memory
+module Make
     (Branch : S.SERIALIZABLE)
     (Commit : S.HASHABLE)
     (Node : S.HASHABLE)

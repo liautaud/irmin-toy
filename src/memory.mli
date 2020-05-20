@@ -5,4 +5,4 @@
     backend is instanciated, so the same Backend module can be reused in
     multiple databases. *)
 
-module Memory : S.BACKEND
+module Make : S.BACKEND
