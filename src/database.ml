@@ -62,7 +62,12 @@ struct
 
   type config = Backend.config
 
-  type t = { backend : Backend.t; config : config }
+  type t = {
+    backend : Backend.t;
+    config : config;
+    (* Lock used to avoid writing new objects during garbage collection. *)
+    write_lock : Lwt_mutex.t;
+  }
 
   let branches_store t = Backend.branches_t t.backend
 
@@ -74,12 +79,17 @@ struct
 
   type workspace = {
     t : t;
+    (* Pointer to the current branch or the current detached commit. *)
     head : [ `Branch of branch | `Head of commit_hash option ref ];
   }
 
   (** {3 Operations on blobs.} *)
 
   module Blobs = struct
+    let set t b =
+      Lwt_mutex.with_lock t.write_lock (fun () ->
+          Backend.Blobs.set (blobs_store t) b)
+
     let to_hash b = BH (Blob.hash b)
 
     let of_hash t (BH h) = Backend.Blobs.find (blobs_store t) h >|= Option.get
@@ -88,6 +98,10 @@ struct
   (** {3 Operations on nodes.} *)
 
   module Nodes = struct
+    let set t n =
+      Lwt_mutex.with_lock t.write_lock (fun () ->
+          Backend.Nodes.set (nodes_store t) n)
+
     let to_hash n = NH (Node.hash n)
 
     let of_hash t (NH h) = Backend.Nodes.find (nodes_store t) h >|= Option.get
@@ -111,6 +125,10 @@ struct
   (** {3 Operations on commits.} *)
 
   module Commits = struct
+    let set t c =
+      Lwt_mutex.with_lock t.write_lock (fun () ->
+          Backend.Commits.set (commits_store t) c)
+
     let to_hash c = CH (Commit.hash c)
 
     let of_hash t (CH h) =
@@ -148,7 +166,19 @@ struct
 
   (** {3 Creating database instances.} *)
 
-  let create config = { backend = Backend.create config; config }
+  let create config =
+    {
+      backend = Backend.create config;
+      config;
+      write_lock = Lwt_mutex.create ();
+    }
+
+  let initialize ~master t =
+    let message = "Initial commit." in
+    let%lwt node_hash = Nodes.set t [] in
+    let commit = { parents = []; node = NH node_hash; message } in
+    let%lwt commit_hash = Commits.set t commit in
+    Branches.set_commit_hash t master (CH commit_hash)
 
   (** {3 Opening workspaces.} *)
 
@@ -185,6 +215,12 @@ struct
     let%lwt n = Commits.node w.t c in
     traverse p n
 
+  let mem w p =
+    try%lwt
+      let%lwt _ = get_tree w p in
+      Lwt.return_true
+    with Invalid_argument _ -> Lwt.return_false
+
   let get w p =
     get_tree w p >|= function
     | `Blob b -> b
@@ -202,10 +238,9 @@ struct
       Returns the hash of the root node of [tree]. *)
   let rec store_tree t tree =
     match tree with
-    | `Blob b -> Backend.Blobs.set (blobs_store t) b >|= fun bh -> `Blob (BH bh)
+    | `Blob b -> Blobs.set t b >|= fun bh -> `Blob (BH bh)
     | `Node ns ->
-        map_snd (store_tree t) ns >>= Backend.Nodes.set (nodes_store t)
-        >|= fun nh -> `Node (NH nh)
+        map_snd (store_tree t) ns >>= Nodes.set t >|= fun nh -> `Node (NH nh)
 
   (** [merge_trees a b] recursively merges [a] and [b]. In case of a conflict,
       the subtree from [b] is always used. *)
@@ -251,7 +286,7 @@ struct
               | None -> children ) )
           >>= fun children' ->
           (* Store the resulting node. *)
-          Backend.Nodes.set (nodes_store t) children' >|= fun nh ->
+          Nodes.set t children' >|= fun nh ->
           (* Return its hash. *)
           Some (`Node (NH nh))
       | step :: steps, `Blob _ -> on_dead_end (step :: steps)
@@ -293,10 +328,10 @@ struct
     let p =
       match parents with
       | Some p -> List.map Commits.to_hash p
-      | None -> head_commit.parents
+      | None -> [ Commits.to_hash head_commit ]
     in
     let c = { parents = p; node = n; message } in
-    let%lwt ch = Backend.Commits.set (commits_store w.t) c in
+    let%lwt ch = Commits.set w.t c in
     let%lwt () = update_head w (CH ch) in
     Lwt.return c
 
@@ -319,7 +354,7 @@ struct
       | None -> head_commit.parents
     in
     let c = { parents = p; node = n; message } in
-    let%lwt ch = Backend.Commits.set (commits_store w.t) c in
+    let%lwt ch = Commits.set w.t c in
     let%lwt () = update_head w (CH ch) in
     Lwt.return c
 
@@ -342,12 +377,20 @@ struct
     end
 
     module Vertex_T = struct
-      type t = vertex
+      include Serializable_T (struct
+        type t = vertex
 
-      let t = vertex_t
+        let t = vertex_t
+      end)
+
+      let print = function
+        | `Branch b -> Printf.sprintf "b:%s" (Branch.print b)
+        | `Commit (CH h) -> Printf.sprintf "c:%s" h
+        | `Node (NH h) -> Printf.sprintf "n:%s" h
+        | `Blob (BH h) -> Printf.sprintf "b:%s" h
     end
 
-    module OGraph = Object_graph.Make (Label_T) (Serializable_T (Vertex_T))
+    module OGraph = Object_graph.Make (Label_T) (Vertex_T)
 
     let iter ?depth ?(full = false) ?(rev = true) ~min ~max ~vertex ~edge ~skip
         t =
@@ -384,7 +427,7 @@ struct
       let mem_vertex v = Hashtbl.mem vertices v in
       let edges = ref [] in
       let add_edge v1 v2 l =
-        if mem_vertex v1 && mem_vertex v2 then edges := (v1, l, v2) :: !edges
+        if mem_vertex v1 && mem_vertex v2 then edges := (v2, l, v1) :: !edges
       in
 
       (* Define formatting of Graphviz vertices and edges. *)
@@ -465,15 +508,21 @@ struct
       iter ~min ~max ~vertex ~edge ~skip ~rev:false t >|= fun () -> table
 
     let cleanup ?entry t =
-      (* Filter the stores to keep only the encountered objects. *)
-      trace ?entry t >>= fun table ->
-      Backend.Commits.filter (commits_store t) (fun k ->
-          OGraph.Table.mem table (`Commit (CH k)))
-      >>= fun () ->
-      Backend.Nodes.filter (nodes_store t) (fun k ->
-          OGraph.Table.mem table (`Node (NH k)))
-      >>= fun () ->
-      Backend.Blobs.filter (blobs_store t) (fun k ->
-          OGraph.Table.mem table (`Blob (BH k)))
+      (* Temporarily prevents writes to backend stores from happening so that
+         objects don't accidentaly get ignored by the collector. Note that we
+         don't block the creation and update of branches, so when using the
+         entrypoint `Branches we only guarantee that the collection starts
+         from the branches available when the collector is started. *)
+      Lwt_mutex.with_lock t.write_lock (fun () ->
+          trace ?entry t >>= fun table ->
+          (* Filter the stores to keep only the encountered objects. *)
+          Backend.Commits.filter (commits_store t) (fun k ->
+              OGraph.Table.mem table (`Commit (CH k)))
+          >>= fun () ->
+          Backend.Nodes.filter (nodes_store t) (fun k ->
+              OGraph.Table.mem table (`Node (NH k)))
+          >>= fun () ->
+          Backend.Blobs.filter (blobs_store t) (fun k ->
+              OGraph.Table.mem table (`Blob (BH k))))
   end
 end

@@ -61,7 +61,7 @@ module Make (Label : S.TYPE) (Vertex : S.SERIALIZABLE) = struct
 
     let default_edge_attributes _ = []
 
-    let vertex_name = Vertex.print
+    let vertex_name v = Printf.sprintf "\"%s\"" (Vertex.print v)
 
     let vertex_attributes k = !vertex_attributes k
 

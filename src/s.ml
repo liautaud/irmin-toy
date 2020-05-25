@@ -20,8 +20,10 @@ module type DATABASE = sig
       database from the perspective of the current head, which can either point
       to a named branch or a single detached commit. *)
 
-  type config
+  type config = unit
   (** The type of configuration options used when creating a database. *)
+
+  (* FIXME *)
 
   type branch
   (** The type of database branches. *)
@@ -59,6 +61,11 @@ module type DATABASE = sig
   (** Creates a new database instance with the given configuration, which will
       be passed along to the backend. *)
 
+  val initialize : master:branch -> t -> unit Lwt.t
+  (** Initializes an empty database by creating an initial commit associated
+      with an empty node, and a branch named [master] which points to that
+      commit. *)
+
   (** {3 Opening workspaces.} *)
 
   val checkout : t -> branch -> workspace Lwt.t
@@ -77,6 +84,9 @@ module type DATABASE = sig
   val head : workspace -> commit Lwt.t
   (** [head w] is the commit to which the head of [w] is currently pointing.
       Raises [Invalid_argument] if [w] doesn't point to a valid commit. *)
+
+  val mem : workspace -> path -> bool Lwt.t
+  (** [mem w path] returns whether [path] exists. *)
 
   val get : workspace -> path -> blob Lwt.t
   (** [get w path] returns the blob stored at [path]. Raises [Invalid_argument]
@@ -475,8 +485,10 @@ module type BACKEND = functor
   type t
   (** The type of backends. *)
 
-  type config
+  type config = unit
   (** The type of configuration options used when creating backends. *)
+
+  (* FIXME *)
 
   val create : config -> t
   (** Creates a new backend for a given configuration. *)

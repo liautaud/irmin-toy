@@ -1,0 +1,5 @@
+(test
+ (name test)
+ (preprocess
+  (pps ppx_irmin lwt_ppx))
+ (libraries toy alcotest))

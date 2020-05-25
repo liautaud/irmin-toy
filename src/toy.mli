@@ -1,4 +1,5 @@
 open S
+module S = S
 
 (** {1 Database creation.} *)
 
@@ -12,21 +13,36 @@ module Make : functor
   (Branch : SERIALIZABLE)
   (Step : SERIALIZABLE)
   (Blob : SERIALIZABLE)
-  -> DATABASE
+  ->
+  DATABASE
+    with type branch = Branch.t
+     and type step = Step.t
+     and type blob = Blob.t
 
 (** [Basic (Backend)] returns an Irmin database module which stores strings
     under string paths, using the given [Backend]. *)
-module Basic : functor (Hash : HASH) (Backend : BACKEND) -> DATABASE
+module Basic : functor (Hash : HASH) (Backend : BACKEND) ->
+  DATABASE
+    with type branch = string
+     and type step = string
+     and type blob = string
+
+(** {1 Available hash functions.} *)
+
+module Hash = Hash
+
+module Hashable = Type.Hashable
+(** [Hashable (Hash) (Type)] turns a serializable runtime type [Type] into a
+    hashable type using the provided hash function. This will produce hashes
+    computed with [hash x = H.to_hex (H.hash (T.serialize x))]. *)
 
 (** {1 Available runtime types.} *)
 
-module Types : sig
-  module String : SERIALIZABLE
-end
+module Type = Type.Types
 
 (** {1 Available backend implementations.} *)
 
-module Backends : sig
+module Backend : sig
   module Memory : BACKEND
   (** In-memory backend using hashtables. *)
 end
