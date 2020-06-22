@@ -20,10 +20,8 @@ module type DATABASE = sig
       database from the perspective of the current head, which can either point
       to a named branch or a single detached commit. *)
 
-  type config = unit
+  type config
   (** The type of configuration options used when creating a database. *)
-
-  (* FIXME *)
 
   type branch
   (** The type of database branches. *)
@@ -55,7 +53,7 @@ module type DATABASE = sig
   type blob_hash
   (** The type of hashes to blobs. *)
 
-  (** {3 Creating database instances.} *)
+  (** {3 Creating and closing database instances.} *)
 
   val create : config -> t
   (** Creates a new database instance with the given configuration, which will
@@ -65,6 +63,9 @@ module type DATABASE = sig
   (** Initializes an empty database by creating an initial commit associated
       with an empty node, and a branch named [master] which points to that
       commit. *)
+
+  val close : t -> unit Lwt.t
+  (** Closes a previously created database instance. *)
 
   (** {3 Opening workspaces.} *)
 
@@ -275,7 +276,11 @@ end
 (** {1 Runtime types.} *)
 
 module type TYPE = sig
-  (** {2 Runtime types.} *)
+  (** {2 Runtime types.}
+
+      Runtime types are types which have a runtime representation, which helps
+      build custom equality, comparison or encoding functions for these types.
+      In irmin-toy, the runtime types are provided by [Irmin.Type]. *)
   type t
   (** The target type. *)
 
@@ -288,8 +293,8 @@ module type COMPARABLE = sig
 
       Comparable types are types which support ordering and equality. The
       easiest way to construct such a type to use [Type.Comparable_T]. *)
-
-  include TYPE
+  type t
+  (** The target type. *)
 
   val equal : t -> t -> bool
   (** [equal a b] returns whether [a] and [b] are equal. *)
@@ -308,15 +313,34 @@ module type SERIALIZABLE = sig
 
   include COMPARABLE
 
-  val print : t -> string
-  (** [print v] return the human-readable encoding of [v]. *)
-
   val serialize : t -> string
   (** [serialize v] return the binary encoding of [v]. *)
 
   val unserialize : string -> (t, [ `Msg of string ]) Stdlib.result
   (** [unserialize s] decodes the binary encoding [s], and returns either the
       decoded value or an error message. *)
+end
+
+module type DIGEST = sig
+  (** {2 Hash digests.}
+
+      Hash digests are the output of hash functions. They are serializable into
+      both a binary representation (with a fixed size in bytes) and a hexstring
+      representation (with a fixed length in chars). *)
+
+  include SERIALIZABLE
+
+  val size : int
+  (** [size] is the size of the digest in bytes. *)
+
+  val hex_size : int
+  (** [hex_size] is the length of the hex-string representation, in chars. *)
+
+  val of_hex : string -> (t, [ `Msg of string ]) result
+  (** [of_hex h] returns the digest represented by hex-string [h]. *)
+
+  val to_hex : t -> string
+  (** [to_hex h] returns the hexadecimal representation of [h]. *)
 end
 
 module type HASHABLE = sig
@@ -329,26 +353,21 @@ module type HASHABLE = sig
 
   include SERIALIZABLE
 
-  module Hash : SERIALIZABLE
+  module Digest : DIGEST
+  (** The digests produced for the type. *)
 
-  val hash : t -> Hash.t
-  (** [hash v] returns the hash of [v]. *)
+  val hash : t -> Digest.t
+  (** [hash t] returns the digest of [t]. *)
 end
 
 module type HASH = sig
   (** {2 Hash functions.} *)
 
-  type t
-  (** The type of digests produced by the hash function. *)
+  module Digest : DIGEST
+  (** The digests produced by the hash function. *)
 
-  val hash : string -> t
-  (** [hash s] is a deterministic hash computed from the string [s]. *)
-
-  val of_hex : string -> (t, [ `Msg of string ]) result
-  (** [of_hex h] returns the digest represented by hex-string [h]. *)
-
-  val to_hex : t -> string
-  (** [to_hex h] returns the hexadecimal representation of [h]. *)
+  val hash : string -> Digest.t
+  (** [hash v] returns the digest of [v]. *)
 end
 
 (** {1 Low-level storage and backends.} *)
@@ -470,60 +489,65 @@ module type ATOMIC_WRITE_STORE = sig
   (** [list t] returns the list of keys in [t]. *)
 end
 
-module type BACKEND = functor
-  (Branch : HASHABLE)
-  (Commit : HASHABLE)
-  (Node : HASHABLE)
-  (Blob : HASHABLE)
-  -> sig
-  (** {2 Backends.}
+module type BACKEND = sig
+  type config
+  (** The type of configuration options used when creating the backend. *)
 
-      Backends provide the underlying storage for Irmin databases. Specifically,
-      they provide stores for the branches, commits, nodes and blobs which make
-      up the object graph of the database. *)
+  module Make : functor
+    (Branch : HASHABLE)
+    (Commit : HASHABLE)
+    (Node : HASHABLE)
+    (Blob : HASHABLE)
+    -> sig
+    (** {2 Backends.}
 
-  type t
-  (** The type of backends. *)
+        Backends provide the underlying storage for Irmin databases.
+        Specifically, they provide stores for the branches, commits, nodes and
+        blobs which make up the object graph of the database. *)
 
-  type config = unit
-  (** The type of configuration options used when creating backends. *)
+    type t
+    (** The type of backends. *)
 
-  (* FIXME *)
+    val create : config -> t
+    (** Creates a new backend for a given configuration. *)
 
-  val create : config -> t
-  (** Creates a new backend for a given configuration. *)
+    val close : t -> unit Lwt.t
+    (** Closes a previously created backend instance. *)
 
-  (** The atomically writable store used to store branches. *)
-  module Branches :
-    ATOMIC_WRITE_STORE with type key = Branch.t and type value = Commit.Hash.t
+    (** The atomically writable store used to store branches. *)
+    module Branches :
+      ATOMIC_WRITE_STORE
+        with type key = Branch.t
+         and type value = Commit.Digest.t
 
-  (** The content-addressable store used to store commits. *)
-  module Commits :
-    CONTENT_ADDRESSABLE_STORE
-      with type key = Commit.Hash.t
-       and type value = Commit.t
+    (** The content-addressable store used to store commits. *)
+    module Commits :
+      CONTENT_ADDRESSABLE_STORE
+        with type key = Commit.Digest.t
+         and type value = Commit.t
 
-  (** The content-addressable store used to store tree nodes. *)
-  module Nodes :
-    CONTENT_ADDRESSABLE_STORE
-      with type key = Node.Hash.t
-       and type value = Node.t
+    (** The content-addressable store used to store tree nodes. *)
+    module Nodes :
+      CONTENT_ADDRESSABLE_STORE
+        with type key = Node.Digest.t
+         and type value = Node.t
 
-  (** The content-addressable store used to store blobs. *)
-  module Blobs :
-    CONTENT_ADDRESSABLE_STORE
-      with type key = Blob.Hash.t
-       and type value = Blob.t
+    (** The content-addressable store used to store blobs. *)
+    module Blobs :
+      CONTENT_ADDRESSABLE_STORE
+        with type key = Blob.Digest.t
+         and type value = Blob.t
 
-  val branches_t : t -> Branches.t
-  (** Returns a handle to the branch store. *)
+    val branches_t : t -> Branches.t
+    (** Returns a handle to the branch store. *)
 
-  val commits_t : t -> Commits.t
-  (** Returns a handle to the commit store. *)
+    val commits_t : t -> Commits.t
+    (** Returns a handle to the commit store. *)
 
-  val nodes_t : t -> Nodes.t
-  (** Returns a handle to the node store. *)
+    val nodes_t : t -> Nodes.t
+    (** Returns a handle to the node store. *)
 
-  val blobs_t : t -> Blobs.t
-  (** Returns a handle to the blob store. *)
+    val blobs_t : t -> Blobs.t
+    (** Returns a handle to the blob store. *)
+  end
 end

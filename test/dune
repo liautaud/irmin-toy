@@ -2,4 +2,4 @@
  (name test)
  (preprocess
   (pps ppx_irmin lwt_ppx))
- (libraries toy alcotest))
+ (libraries toy lwt alcotest alcotest-lwt bos fmt logs logs.fmt))

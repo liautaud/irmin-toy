@@ -1,7 +1,6 @@
-module String = Toy.Type.String
-module Hashed = Toy.Hashable (Toy.Hash.SHA256) (String)
+open Toy
 
-let run = Lwt_main.run
+module String = Toy.Hashable (Hash.SHA256) ((val ~:Irmin.Type.string))
 
 let print_list = Irmin.Type.(to_string (list string))
 

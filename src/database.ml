@@ -3,24 +3,28 @@ open Type
 open Printf
 open Astring
 
+let ( ++ ) = Int64.add
+
 let map_snd f = Lwt_list.map_p (fun (a, b) -> f b >|= fun b -> (a, b))
 
 module Make
     (Hash : S.HASH)
     (Backend : S.BACKEND)
-    (Branch : S.SERIALIZABLE)
-    (Step : S.SERIALIZABLE)
-    (Blob : S.SERIALIZABLE) =
+    (Branch_T : S.TYPE)
+    (Step_T : S.TYPE)
+    (Blob_T : S.TYPE) =
 struct
-  type branch = Branch.t
+  type branch = Branch_T.t
 
-  let branch_t = Branch.t
+  let branch_t = Branch_T.t
 
-  type step = Step.t
+  type step = Step_T.t
 
-  let step_t = Step.t
+  let step_t = Step_T.t
 
-  type blob = Blob.t
+  type blob = Blob_T.t
+
+  let blob_t = Blob_T.t
 
   type commit_hash = CH of string [@@unboxed] [@@deriving irmin]
 
@@ -54,19 +58,23 @@ struct
     let t = node_t
   end
 
-  module Branch = Hashable (Hash) (Branch)
-  module Commit = Hashable_T (Hash) (Commit_T)
-  module Node = Hashable_T (Hash) (Node_T)
-  module Blob = Hashable (Hash) (Blob)
-  module Backend = Backend (Branch) (Commit) (Node) (Blob)
-
   type config = Backend.config
+
+  module Branch = Hashable (Hash) (Branch_T)
+  module Commit = Hashable (Hash) (Commit_T)
+  module Node = Hashable (Hash) (Node_T)
+  module Blob = Hashable (Hash) (Blob_T)
+  module Backend = Backend.Make (Branch) (Commit) (Node) (Blob)
 
   type t = {
     backend : Backend.t;
     config : config;
     (* Lock used to avoid writing new objects during garbage collection. *)
     write_lock : Lwt_mutex.t;
+    (* Various statistics about the current instance. *)
+    mutable blobs_count : int64;
+    mutable nodes_count : int64;
+    mutable commits_count : int64;
   }
 
   let branches_store t = Backend.branches_t t.backend
@@ -88,11 +96,15 @@ struct
   module Blobs = struct
     let set t b =
       Lwt_mutex.with_lock t.write_lock (fun () ->
+          t.blobs_count <- t.blobs_count ++ 1L;
           Backend.Blobs.set (blobs_store t) b)
 
-    let to_hash b = BH (Blob.hash b)
+    let to_hash b = BH (Blob.hash b |> Blob.Digest.serialize)
 
-    let of_hash t (BH h) = Backend.Blobs.find (blobs_store t) h >|= Option.get
+    let of_hash t (BH h) =
+      Backend.Blobs.find (blobs_store t)
+        (Blob.Digest.unserialize h |> Result.get_ok)
+      >|= Option.get
   end
 
   (** {3 Operations on nodes.} *)
@@ -100,11 +112,15 @@ struct
   module Nodes = struct
     let set t n =
       Lwt_mutex.with_lock t.write_lock (fun () ->
+          t.nodes_count <- t.nodes_count ++ 1L;
           Backend.Nodes.set (nodes_store t) n)
 
-    let to_hash n = NH (Node.hash n)
+    let to_hash n = NH (Node.hash n |> Node.Digest.serialize)
 
-    let of_hash t (NH h) = Backend.Nodes.find (nodes_store t) h >|= Option.get
+    let of_hash t (NH h) =
+      Backend.Nodes.find (nodes_store t)
+        (Node.Digest.unserialize h |> Result.get_ok)
+      >|= Option.get
 
     let children t n =
       n
@@ -127,12 +143,15 @@ struct
   module Commits = struct
     let set t c =
       Lwt_mutex.with_lock t.write_lock (fun () ->
+          t.commits_count <- t.commits_count ++ 1L;
           Backend.Commits.set (commits_store t) c)
 
-    let to_hash c = CH (Commit.hash c)
+    let to_hash c = CH (Commit.hash c |> Commit.Digest.serialize)
 
     let of_hash t (CH h) =
-      Backend.Commits.find (commits_store t) h >|= Option.get
+      Backend.Commits.find (commits_store t)
+        (Commit.Digest.unserialize h |> Result.get_ok)
+      >|= Option.get
 
     let parents t c = c.parents |> Lwt_list.map_p (of_hash t)
 
@@ -150,10 +169,12 @@ struct
 
     let get_commit_hash t b =
       Backend.Branches.find (branches_store t) b >|= function
-      | Some h -> CH h
+      | Some h -> CH (Commit.Digest.serialize h)
       | _ -> invalid_arg "Branch not found."
 
-    let set_commit_hash t b (CH h) = Backend.Branches.set (branches_store t) b h
+    let set_commit_hash t b (CH h) =
+      Backend.Branches.set (branches_store t) b
+        (Commit.Digest.unserialize h |> Result.get_ok)
 
     let get t b = get_commit_hash t b >>= fun h -> Commits.of_hash t h
 
@@ -171,14 +192,21 @@ struct
       backend = Backend.create config;
       config;
       write_lock = Lwt_mutex.create ();
+      blobs_count = 0L;
+      nodes_count = 0L;
+      commits_count = 0L;
     }
 
   let initialize ~master t =
     let message = "Initial commit." in
-    let%lwt node_hash = Nodes.set t [] in
+    let%lwt node_digest = Nodes.set t [] in
+    let node_hash = Node.Digest.serialize node_digest in
     let commit = { parents = []; node = NH node_hash; message } in
-    let%lwt commit_hash = Commits.set t commit in
+    let%lwt commit_digest = Commits.set t commit in
+    let commit_hash = Commit.Digest.serialize commit_digest in
     Branches.set_commit_hash t master (CH commit_hash)
+
+  let close t = Backend.close t.backend
 
   (** {3 Opening workspaces.} *)
 
@@ -238,9 +266,14 @@ struct
       Returns the hash of the root node of [tree]. *)
   let rec store_tree t tree =
     match tree with
-    | `Blob b -> Blobs.set t b >|= fun bh -> `Blob (BH bh)
+    | `Blob b ->
+        Blobs.set t b >|= fun bd ->
+        let bh = Node.Digest.serialize bd in
+        `Blob (BH bh)
     | `Node ns ->
-        map_snd (store_tree t) ns >>= Nodes.set t >|= fun nh -> `Node (NH nh)
+        map_snd (store_tree t) ns >>= Nodes.set t >|= fun nd ->
+        let nh = Node.Digest.serialize nd in
+        `Node (NH nh)
 
   (** [merge_trees a b] recursively merges [a] and [b]. In case of a conflict,
       the subtree from [b] is always used. *)
@@ -286,8 +319,9 @@ struct
               | None -> children ) )
           >>= fun children' ->
           (* Store the resulting node. *)
-          Nodes.set t children' >|= fun nh ->
+          Nodes.set t children' >|= fun nd ->
           (* Return its hash. *)
+          let nh = Node.Digest.serialize nd in
           Some (`Node (NH nh))
       | step :: steps, `Blob _ -> on_dead_end (step :: steps)
       | [], n -> on_found n
@@ -331,7 +365,8 @@ struct
       | None -> [ Commits.to_hash head_commit ]
     in
     let c = { parents = p; node = n; message } in
-    let%lwt ch = Commits.set w.t c in
+    let%lwt cd = Commits.set w.t c in
+    let ch = Commit.Digest.serialize cd in
     let%lwt () = update_head w (CH ch) in
     Lwt.return c
 
@@ -354,7 +389,8 @@ struct
       | None -> head_commit.parents
     in
     let c = { parents = p; node = n; message } in
-    let%lwt ch = Commits.set w.t c in
+    let%lwt cd = Commits.set w.t c in
+    let ch = Commit.Digest.serialize cd in
     let%lwt () = update_head w (CH ch) in
     Lwt.return c
 
@@ -377,14 +413,12 @@ struct
     end
 
     module Vertex_T = struct
-      include Serializable_T (struct
-        type t = vertex
+      type t = vertex
 
-        let t = vertex_t
-      end)
+      let t = vertex_t
 
       let print = function
-        | `Branch b -> Printf.sprintf "b:%s" (Branch.print b)
+        | `Branch b -> Printf.sprintf "b:%s" (Irmin.Type.to_string branch_t b)
         | `Commit (CH h) -> Printf.sprintf "c:%s" h
         | `Node (NH h) -> Printf.sprintf "n:%s" h
         | `Blob (BH h) -> Printf.sprintf "b:%s" h
@@ -435,7 +469,9 @@ struct
         if String.length h <= 8 then h else String.with_range h ~len:8
       in
 
-      let label_of_branch k = Lwt.return (`Label (Branch.print k)) in
+      let label_of_branch k =
+        Lwt.return (`Label (Irmin.Type.to_string branch_t k))
+      in
       let label_of_commit (CH h) =
         Commits.of_hash t (CH h) >|= fun c ->
         `Label (sprintf "%s (%s)" (trunc h) c.message)
@@ -443,9 +479,9 @@ struct
       let label_of_node (NH h) = Lwt.return (`Label (trunc h)) in
       let label_of_blob (BH h) =
         Blobs.of_hash t (BH h) >|= fun b ->
-        `Label (sprintf "%s (%s)" (trunc h) (Blob.print b))
+        `Label (sprintf "%s (%s)" (trunc h) (Irmin.Type.to_string blob_t b))
       in
-      let label_of_step s = `Label (Step.print s) in
+      let label_of_step s = `Label (Irmin.Type.to_string step_t s) in
 
       (* Traverse the object graph. *)
       let vertex v =
@@ -513,16 +549,21 @@ struct
          don't block the creation and update of branches, so when using the
          entrypoint `Branches we only guarantee that the collection starts
          from the branches available when the collector is started. *)
+      Logs.info (fun l -> l "Starting the garbage collector.");
+      Logs.info (fun l -> l "Current number of commits: %Ld" t.commits_count);
+      Logs.info (fun l -> l "Current number of nodes: %Ld" t.nodes_count);
+      Logs.info (fun l -> l "Current number of blobs: %Ld" t.blobs_count);
+
       Lwt_mutex.with_lock t.write_lock (fun () ->
           trace ?entry t >>= fun table ->
           (* Filter the stores to keep only the encountered objects. *)
           Backend.Commits.filter (commits_store t) (fun k ->
-              OGraph.Table.mem table (`Commit (CH k)))
+              OGraph.Table.mem table (`Commit (CH (Commit.Digest.serialize k))))
           >>= fun () ->
           Backend.Nodes.filter (nodes_store t) (fun k ->
-              OGraph.Table.mem table (`Node (NH k)))
+              OGraph.Table.mem table (`Node (NH (Node.Digest.serialize k))))
           >>= fun () ->
           Backend.Blobs.filter (blobs_store t) (fun k ->
-              OGraph.Table.mem table (`Blob (BH k))))
+              OGraph.Table.mem table (`Blob (BH (Blob.Digest.serialize k)))))
   end
 end

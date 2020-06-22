@@ -1,0 +1,5 @@
+(executable
+ (name bench)
+ (preprocess
+  (pps ppx_irmin lwt_ppx))
+ (libraries toy lwt bos fmt logs logs.fmt))

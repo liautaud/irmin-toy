@@ -1,3 +1,10 @@
+(* In-memory backend for irmin-toy.
+
+    This backend stores all branches, commits, nodes and blobs into separate
+    hashtables in memory. A new set of hashtables is created each time the
+    backend is instanciated, so the same Backend module can be reused in
+    multiple databases. *)
+
 open Lwt.Infix
 
 (* Immutable store which uses in-memory hashtables. *)
@@ -9,6 +16,10 @@ module Immutable (K : S.SERIALIZABLE) (V : S.SERIALIZABLE) = struct
   type value = V.t
 
   let create () = { table = Hashtbl.create 256 }
+
+  let close t =
+    Hashtbl.clear t.table;
+    Lwt.return_unit
 
   let mem t k = Hashtbl.mem t.table k |> Lwt.return
 
@@ -27,7 +38,7 @@ end
 
 (* Content-addressable store derived from the immutable store. *)
 module Content_Addressable (V : S.HASHABLE) = struct
-  include Immutable (V.Hash) (V)
+  include Immutable (V.Digest) (V)
 
   let set t v =
     let h = V.hash v in
@@ -59,39 +70,48 @@ module Atomic_Write (K : S.SERIALIZABLE) (V : S.SERIALIZABLE) = struct
 end
 
 (* Memory backend using the stores defined above. *)
-module Make
-    (Branch : S.SERIALIZABLE)
-    (Commit : S.HASHABLE)
-    (Node : S.HASHABLE)
-    (Blob : S.HASHABLE) =
-struct
-  module Branches = Atomic_Write (Branch) (Commit.Hash)
-  module Commits = Content_Addressable (Commit)
-  module Nodes = Content_Addressable (Node)
-  module Blobs = Content_Addressable (Blob)
-
-  type t = {
-    branches : Branches.t;
-    commits : Commits.t;
-    nodes : Nodes.t;
-    blobs : Blobs.t;
-  }
-
+module Backend = struct
   type config = unit
 
-  let create () =
-    {
-      branches = Branches.create ();
-      commits = Commits.create ();
-      nodes = Nodes.create ();
-      blobs = Blobs.create ();
+  module Make
+      (Branch : S.SERIALIZABLE)
+      (Commit : S.HASHABLE)
+      (Node : S.HASHABLE)
+      (Blob : S.HASHABLE) =
+  struct
+    module Branches = Atomic_Write (Branch) (Commit.Digest)
+    module Commits = Content_Addressable (Commit)
+    module Nodes = Content_Addressable (Node)
+    module Blobs = Content_Addressable (Blob)
+
+    type t = {
+      branches : Branches.t;
+      commits : Commits.t;
+      nodes : Nodes.t;
+      blobs : Blobs.t;
     }
 
-  let branches_t t = t.branches
+    let create () =
+      {
+        branches = Branches.create ();
+        commits = Commits.create ();
+        nodes = Nodes.create ();
+        blobs = Blobs.create ();
+      }
 
-  let commits_t t = t.commits
+    let close t =
+      let%lwt () = Branches.close t.branches in
+      let%lwt () = Commits.close t.commits in
+      let%lwt () = Nodes.close t.nodes in
+      let%lwt () = Blobs.close t.blobs in
+      Lwt.return_unit
 
-  let nodes_t t = t.nodes
+    let branches_t t = t.branches
 
-  let blobs_t t = t.blobs
+    let commits_t t = t.commits
+
+    let nodes_t t = t.nodes
+
+    let blobs_t t = t.blobs
+  end
 end

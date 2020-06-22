@@ -27,7 +27,13 @@ let list_partition_map f t =
   in
   aux [] [] t
 
-module Make (Label : S.TYPE) (Vertex : S.SERIALIZABLE) = struct
+module type PRINTABLE = sig
+  include S.TYPE
+
+  val print : t -> string
+end
+
+module Make (Label : S.TYPE) (Vertex : PRINTABLE) = struct
   type label = Label.t
   (** Labels of the edges in the graph. *)
 
@@ -37,9 +43,9 @@ module Make (Label : S.TYPE) (Vertex : S.SERIALIZABLE) = struct
   module X = struct
     type t = Vertex.t
 
-    let equal = Vertex.equal
+    let equal = Irmin.Type.equal Vertex.t
 
-    let compare = Vertex.compare
+    let compare = Irmin.Type.compare Vertex.t
 
     let hash x = Irmin.Type.short_hash Vertex.t x
   end
