@@ -7,6 +7,8 @@
 
 open Lwt.Infix
 
+let src = Logs.Src.create "backend.memory" ~doc:"In-memory backend"
+
 (* Immutable store which uses in-memory hashtables. *)
 module Immutable (K : S.SERIALIZABLE) (V : S.SERIALIZABLE) = struct
   type t = { table : (K.t, V.t) Hashtbl.t }
@@ -71,6 +73,8 @@ end
 
 (* Memory backend using the stores defined above. *)
 module Backend = struct
+  let src = src
+
   type config = unit
 
   module Make

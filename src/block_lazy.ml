@@ -78,7 +78,7 @@ end
 module Immutable (K : S.DIGEST) (V : S.SERIALIZABLE) = struct
   type entry = Index_V.t
 
-  module Index = Index_unix.Make (Index_K (K)) (Index_V)
+  module Index = Index_unix.Make (Index_K (K)) (Index_V) (Index.Cache.Noop)
 
   type t = {
     path : string;
@@ -358,6 +358,8 @@ end
 
 (* Block backend using the stores defined above. *)
 module Backend = struct
+  let src = src
+
   type config = string
 
   module Make

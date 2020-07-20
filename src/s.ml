@@ -266,10 +266,32 @@ module type DATABASE = sig
         nodes and blobs, is exported, otherwise it is the commit history graph
         only. *)
 
-    val cleanup : ?entry:[ `Branches | `List of commit list ] -> t -> unit Lwt.t
-    (** [cleanup ~entry t] runs the garbage collector on the object graph of
+    val cleanup :
+      ?heads:[ `Branches | `List of commit list ] ->
+      ?limit_count:int ->
+      ?limit_time:float ->
+      t ->
+      (unit, [> `Run_again ]) result Lwt.t
+    (** [cleanup ~heads t] runs the garbage collector on the object graph of
         database [t]. All the commits, nodes and blobs which are not reachable
-        from [entry] will be deleted from their back-end stores. *)
+        from [heads] will be deleted from their back-end stores.
+
+        The garbage collector is incremental, meaning that garbage collection
+        can be interleaved with other database operations. This is done via two
+        distinct mechanisms:
+
+        - The Lwt thread of the collector will yield on every I/O operation to
+          allow other threads to execute while waiting for results;
+        - The [?limit_count] and [?limit_time] options force the collector to
+          return after processing more than a limit number of objects or after
+          running for a limit number of seconds. In this case, the function will
+          return [Error `Run_again], and it will need to be run again at a later
+          time to finish collection.
+
+        Warning: after the collector returns [Error `Run_again], its memory
+        consumption will increase slightly with every new commit, node or blob
+        allocated into the database. To avoid this, do not forget to call the
+        function again to finish the collection pass. *)
   end
 end
 
@@ -490,6 +512,9 @@ module type ATOMIC_WRITE_STORE = sig
 end
 
 module type BACKEND = sig
+  val src : Logs.src
+  (** The log source for the backend. *)
+
   type config
   (** The type of configuration options used when creating the backend. *)
 

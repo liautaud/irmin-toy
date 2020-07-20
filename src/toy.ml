@@ -16,6 +16,7 @@ module Backend = struct
   end
 end
 
+let src = Database.src
 module Make = Database.Make
 module Basic (Hash : HASH) (Backend : BACKEND) =
   Make (Hash) (Backend) (Types.String) (Types.String) (Types.String)

@@ -1,5 +1,7 @@
 open S
-module S = S
+
+(** The log source for the database. *)
+val src : Logs.src
 
 (** {1 Database creation.} *)
 

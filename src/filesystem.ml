@@ -6,6 +6,8 @@
 
 open Lwt.Infix
 
+let src = Logs.Src.create "backend.filesystem" ~doc:"Filesystem backend"
+
 let ( / ) = Filename.concat
 
 (* Input-output operations on a Unix filesystem.
@@ -58,7 +60,7 @@ module Immutable (K : SANITIZABLE) (V : S.SERIALIZABLE) = struct
       | Some b -> Result.to_option (V.unserialize b)
     with _ -> Lwt.return_none
 
-  let set t k v = IO.write_file ~lock (path t k) (V.serialize v)
+  let set t k v = IO.write_file ~lock:(t.path / lock) (path t k) (V.serialize v)
 
   let list t =
     IO.files t.path >|= List.map Filename.basename
@@ -67,18 +69,18 @@ module Immutable (K : SANITIZABLE) (V : S.SERIALIZABLE) = struct
           | k -> Result.to_option (K.unsanitize k))
 
   let filter t p =
-    IO.Lock.with_lock (Some lock) (fun () ->
+    IO.Lock.with_lock (Some (t.path / lock)) (fun () ->
         list t
         >|= List.filter (fun k -> not (p k))
         >|= List.map (path t)
         >>= Lwt_list.iter_p IO.remove_file)
 
-  let remove t k = IO.remove_file ~lock (path t k)
+  let remove t k = IO.remove_file ~lock:(t.path / lock) (path t k)
 
   let test_and_set t k ~test ~set =
     let test = Option.map V.serialize test in
     let set = Option.map V.serialize set in
-    IO.test_and_set_file ~lock ~test ~set (path t k)
+    IO.test_and_set_file ~lock:(t.path / lock) ~test ~set (path t k)
 end
 
 (* Content-addressable store derived from the immutable store. *)
@@ -108,6 +110,8 @@ end
 
 (* Filesystem backend using the stores defined above. *)
 module Backend = struct
+  let src = src
+
   type config = string
 
   module Make

@@ -64,7 +64,7 @@ end
 module Immutable (K : S.DIGEST) (V : S.SERIALIZABLE) = struct
   type entry = Index_V.t
 
-  module Index = Index_unix.Make (Index_K (K)) (Index_V)
+  module Index = Index_unix.Make (Index_K (K)) (Index_V) (Index.Cache.Noop)
 
   type t = {
     path : string;
@@ -198,6 +198,7 @@ module Immutable (K : S.DIGEST) (V : S.SERIALIZABLE) = struct
        that need to be kept to the other index and other pack. Once they are all
        copied, atomically switch [t.current], and finally erase the contents of
        the previous index and pack. *)
+    let start = Sys.time () in
     Log.info (fun l -> l "Waiting for the filter_lock.");
     Lwt_mutex.with_lock t.filter_lock (fun () ->
         (* This guarded section prevents calls to filter from running concurrently.
@@ -233,6 +234,7 @@ module Immutable (K : S.DIGEST) (V : S.SERIALIZABLE) = struct
         Lwt_unix.yield () >>= fun () ->
         Index.clear current_index;
         Pack.Unix.clear current_pack;
+        Log.info (fun l -> l "Filter duration: %fs." (Sys.time () -. start));
         Lwt.return_unit)
 
   let remove t k = filter t (fun kt -> not (K.equal kt k))
@@ -255,6 +257,8 @@ end
 
 (* Block backend using the stores defined above. *)
 module Backend = struct
+  let src = src
+
   type config = string
 
   module Make
